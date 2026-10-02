@@ -156,6 +156,15 @@ class Kitty(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
 
+        # 真正伸爪、张嘴的起跳姿势。
+        pounce_path = assets_path / "cat-pounce.png"
+        pounce = QPixmap(str(pounce_path))
+        if pounce.isNull():
+            raise FileNotFoundError(f"无法加载扑咬图片：{pounce_path}")
+        self.cat_pounce = pounce.scaledToWidth(
+            240, Qt.TransformationMode.SmoothTransformation
+        )
+
         # 加载鱼干
         fish_path = assets_path / "fish.png"
         fish_pixmap = QPixmap(str(fish_path))
@@ -258,7 +267,13 @@ class Kitty(QWidget):
         painter.rotate(angle)
         painter.scale(scale_x, scale_y)
         painter.translate(-pivot)
-        painter.drawPixmap(QPointF(95, cat_y), self.cat)
+        blend = self.pounce_blend()
+        if blend < 1:
+            painter.setOpacity(1 - blend)
+            painter.drawPixmap(QPointF(95, cat_y), self.cat)
+        if blend > 0:
+            painter.setOpacity(blend)
+            painter.drawPixmap(QPointF(95, cat_y), self.cat_pounce)
         painter.restore()
 
         ink = QColor("#35312E")
@@ -311,6 +326,12 @@ class Kitty(QWidget):
             painter.setFont(font)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
+    def pounce_blend(self):
+        if self.state != "feeding":
+            return 0.0
+        t = self.feed_time
+        return max(0.0, min(1.0, (t - 0.18) / 0.06, (0.82 - t) / 0.08))
+
     def cat_pose(self):
         if self.state != "feeding":
             return 1.0, 1.0, 0.0
@@ -320,10 +341,10 @@ class Kitty(QWidget):
             return 1 + 0.06 * u, 1 - 0.13 * u, 0.0
         if t < 0.52:
             u = math.sin((t - 0.18) / 0.34 * math.pi / 2)
-            return 1 - 0.04 * u, 1 + 0.10 * u, 16 * u
+            return 1 - 0.04 * u, 1 + 0.10 * u, 3 * u
         if t < 0.82:
             u = (1 + math.cos(math.pi * (t - 0.52) / 0.30)) / 2
-            return 1 - 0.04 * u, 1 + 0.10 * u, 16 * u
+            return 1 - 0.04 * u, 1 + 0.10 * u, 3 * u
         u = math.sin(math.pi * (t - 0.82) / 0.18)
         return 1 + 0.05 * u, 1 - 0.10 * u, 0.0
 
@@ -336,7 +357,11 @@ class Kitty(QWidget):
         transform.rotate(angle)
         transform.scale(sx, sy)
         transform.translate(-pivot.x(), -pivot.y())
-        mouth = transform.map(QPointF(123, cat_y + self.cat.height() * 0.68))
+        blend = self.pounce_blend()
+        resting_mouth = QPointF(123, cat_y + self.cat.height() * 0.68)
+        open_mouth = QPointF(95 + self.cat_pounce.width() * 0.263,
+                            cat_y + self.cat_pounce.height() * 0.35)
+        mouth = transform.map(resting_mouth * (1 - blend) + open_mouth * blend)
         start = QPointF(125, 58 + self.fish_top)
         travel = max(0.0, min(1.0, (t - 0.30) / 0.22))
         travel = travel * travel * (3 - 2 * travel)
