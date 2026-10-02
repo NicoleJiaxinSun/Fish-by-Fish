@@ -16,7 +16,7 @@ class TaskCard(QWidget):
     """点击鱼干打开的临时任务卡；点击外部或按 Esc 收起。"""
 
     def __init__(self, kitty):
-        super().__init__(kitty, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(kitty, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         self.kitty = kitty
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(300, 265)
@@ -70,6 +70,10 @@ class TaskCard(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        # 清除上一帧的透明区域，避免动画留下旧轮廓。
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # 固定的轻微不规则曲线，避免重绘时边框抖动。
         path = QPainterPath()
@@ -134,6 +138,7 @@ class Kitty(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -237,11 +242,24 @@ class Kitty(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        # 清除上一帧的透明区域，避免动画留下旧轮廓。
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         offset = self.cat_offset()
         cat_y = self.height() - self.cat.height() - 12
-        painter.drawPixmap(QPointF(95, cat_y) + offset, self.cat)
+        painter.save()
+        # 围绕身体底部变形：蓄力压低、起跳伸展、落地缓冲。
+        pivot = QPointF(95 + self.cat.width() * 0.53, cat_y + self.cat.height() * 0.82)
+        scale_x, scale_y, angle = self.cat_pose()
+        painter.translate(pivot + offset)
+        painter.rotate(angle)
+        painter.scale(scale_x, scale_y)
+        painter.translate(-pivot)
+        painter.drawPixmap(QPointF(95, cat_y), self.cat)
+        painter.restore()
 
         ink = QColor("#35312E")
         pen = QPen(ink, 3)
@@ -293,9 +311,32 @@ class Kitty(QWidget):
             painter.setFont(font)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
+    def cat_pose(self):
+        if self.state != "feeding":
+            return 1.0, 1.0, 0.0
+        t = self.feed_time
+        if t < 0.18:
+            u = math.sin(math.pi * t / 0.18)
+            return 1 + 0.06 * u, 1 - 0.13 * u, 0.0
+        if t < 0.52:
+            u = math.sin((t - 0.18) / 0.34 * math.pi / 2)
+            return 1 - 0.04 * u, 1 + 0.10 * u, 16 * u
+        if t < 0.82:
+            u = (1 + math.cos(math.pi * (t - 0.52) / 0.30)) / 2
+            return 1 - 0.04 * u, 1 + 0.10 * u, 16 * u
+        u = math.sin(math.pi * (t - 0.82) / 0.18)
+        return 1 + 0.05 * u, 1 - 0.10 * u, 0.0
+
     def draw_feeding_fish(self, painter, cat_y, offset):
         t = self.feed_time
-        mouth = QPointF(123, cat_y + self.cat.height() * 0.68) + offset
+        pivot = QPointF(95 + self.cat.width() * 0.53, cat_y + self.cat.height() * 0.82)
+        sx, sy, angle = self.cat_pose()
+        transform = QTransform()
+        transform.translate(pivot.x() + offset.x(), pivot.y() + offset.y())
+        transform.rotate(angle)
+        transform.scale(sx, sy)
+        transform.translate(-pivot.x(), -pivot.y())
+        mouth = transform.map(QPointF(123, cat_y + self.cat.height() * 0.68))
         start = QPointF(125, 58 + self.fish_top)
         travel = max(0.0, min(1.0, (t - 0.30) / 0.22))
         travel = travel * travel * (3 - 2 * travel)
