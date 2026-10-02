@@ -1,8 +1,11 @@
 import sys
+import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRectF
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import (
+    Qt, QPoint, QPointF, QRectF, QVariantAnimation, QEasingCurve,
+)
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QSpinBox,
     QPushButton, QVBoxLayout, QHBoxLayout,
@@ -85,8 +88,10 @@ class TaskCard(QWidget):
         painter.drawPath(path)
 
     def open_near_fish(self):
-        self.task_input.setText(self.kitty.task_name)
-        self.progress_input.setValue(self.kitty.progress)
+        if self.kitty.state == "feeding":
+            return
+        self.task_input.setText("" if self.kitty.state == "completed" else self.kitty.task_name)
+        self.progress_input.setValue(0 if self.kitty.state == "completed" else self.kitty.progress)
         anchor = self.kitty.mapToGlobal(QPoint(145, 65))
         screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
         available = screen.availableGeometry()
@@ -100,6 +105,11 @@ class TaskCard(QWidget):
         self.task_input.setFocus()
 
     def save(self):
+        if self.kitty.state == "feeding":
+            return
+        if self.kitty.state == "completed":
+            self.kitty.state = "active"
+            self.kitty.display_progress = 0.0
         self.progress_input.interpretText()
         self.kitty.task_name = self.task_input.text().strip()
         self.kitty.progress = self.progress_input.value()
@@ -107,7 +117,7 @@ class TaskCard(QWidget):
             f"{self.kitty.task_name or '今天的小任务'} · {self.kitty.progress}%\n"
             "点击鱼干设置任务 · 左键拖动 · Esc 退出"
         )
-        self.kitty.update()
+        self.kitty.animate_progress()
         self.hide()
 
     def keyPressEvent(self, event):
@@ -173,7 +183,27 @@ class Kitty(QWidget):
         self.drag_offset = None
 
         # 手动设置的任务进度
+        self.state = "active"
+        self.swing_angle = 0.0
+        self.feed_time = 0.0
+        self.pressed_cat = False
+        self.swing_animation = QVariantAnimation(self)
+        self.swing_animation.setDuration(1100)
+        self.swing_animation.setStartValue(0.0)
+        self.swing_animation.setEndValue(1.0)
+        self.swing_animation.valueChanged.connect(self.on_swing_frame)
+        self.feed_animation = QVariantAnimation(self)
+        self.feed_animation.setDuration(1500)
+        self.feed_animation.setStartValue(0.0)
+        self.feed_animation.setEndValue(1.0)
+        self.feed_animation.valueChanged.connect(self.on_feed_frame)
+        self.feed_animation.finished.connect(self.finish_feeding)
         self.progress = 0
+        self.display_progress = 0.0
+        self.progress_animation = QVariantAnimation(self)
+        self.progress_animation.setDuration(450)
+        self.progress_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.progress_animation.valueChanged.connect(self.on_progress_frame)
         self.task_name = ""
         self.press_position = None
         self.pressed_fish = False
@@ -181,73 +211,154 @@ class Kitty(QWidget):
         self.card = TaskCard(self)
         self.setToolTip("点击鱼干设置任务 · 左键拖动 · Esc 退出")
 
+    def swing_transform(self):
+        transform = QTransform()
+        transform.translate(125, 55)
+        transform.rotate(self.swing_angle)
+        transform.translate(-125, -55)
+        return transform
+
+    def cat_offset(self):
+        if self.state != "feeding":
+            return QPointF(0, 0)
+        t = self.feed_time
+        # 先蓄力，再扑起，叼住后落回原位。
+        if t < 0.18:
+            return QPointF(0, 3 * math.sin(math.pi * t / 0.18))
+        if t < 0.52:
+            u = (t - 0.18) / 0.34
+            lift = math.sin(u * math.pi / 2)
+            return QPointF(-12 * lift, -50 * lift)
+        if t < 0.82:
+            u = (t - 0.52) / 0.30
+            lift = (1 + math.cos(math.pi * u)) / 2
+            return QPointF(-12 * lift, -50 * lift)
+        return QPointF(0, 0)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-        # 小猫
-        cat_x = 95
+        offset = self.cat_offset()
         cat_y = self.height() - self.cat.height() - 12
-        painter.drawPixmap(cat_x, cat_y, self.cat)
+        painter.drawPixmap(QPointF(95, cat_y) + offset, self.cat)
 
-        # 鱼竿
         ink = QColor("#35312E")
         pen = QPen(ink, 3)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-
+        # 底端固定，竿尖跟随轻摆。
+        transform = self.swing_transform()
+        tip = transform.map(QPointF(125, 55))
+        end = transform.map(QPointF(125, 75))
         rod = QPainterPath()
         rod.moveTo(70, self.height() - 20)
-        rod.quadTo(85, 55, 125, 55)
+        rod.quadTo(85 + self.swing_angle * 0.7, 55, tip.x(), tip.y())
         painter.drawPath(rod)
-
-        # 鱼线
         painter.setPen(QPen(ink, 1.5))
-        painter.drawLine(
-            QPointF(125, 55),
-            QPointF(125, 75),
-        )
+        painter.drawLine(tip, end)
 
-        # 鱼干位置
-        fish_x = 125 - self.fish.width() // 2
-        fish_y = 58
+        if self.state == "feeding":
+            self.draw_feeding_fish(painter, cat_y, offset)
+        elif self.state != "completed":
+            painter.save()
+            painter.setTransform(transform, True)
+            fish_x = 125 - self.fish.width() // 2
+            fish_y = 58
+            painter.setOpacity(0.3)
+            painter.drawPixmap(fish_x, fish_y, self.fish)
+            if self.display_progress > 0:
+                painter.setOpacity(1.0)
+                if self.display_progress < 100:
+                    body_height = self.fish_bottom - self.fish_top
+                    start = fish_y + self.fish_bottom - body_height * self.display_progress / 100
+                    painter.setClipRect(QRectF(fish_x, start, self.fish.width(), fish_y + self.fish.height() - start))
+                painter.drawPixmap(fish_x, fish_y, self.fish)
+            painter.restore()
 
-        # 先画整条半透明鱼干
+        text = ""
+        if self.state == "completed":
+            text = "完成啦！点我开始新任务"
+        elif self.state == "active" and self.progress == 100 and self.display_progress >= 99.9:
+            text = "拍拍我，开饭啦"
+        if text:
+            painter.setPen(QPen(QColor("#81796C"), 1))
+            painter.setBrush(QColor("#FAF7EF"))
+            rect = QRectF(155, 112, 184, 32)
+            painter.drawRoundedRect(rect, 12, 12)
+            painter.setPen(ink)
+            font = painter.font()
+            font.setPixelSize(12)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def draw_feeding_fish(self, painter, cat_y, offset):
+        t = self.feed_time
+        mouth = QPointF(123, cat_y + self.cat.height() * 0.68) + offset
+        start = QPointF(125, 58 + self.fish_top)
+        travel = max(0.0, min(1.0, (t - 0.30) / 0.22))
+        travel = travel * travel * (3 - 2 * travel)
+        anchor = start * (1 - travel) + mouth * travel
+        disappear = max(0.0, min(1.0, (t - 0.82) / 0.18))
         painter.save()
-        painter.setOpacity(0.3)
-        painter.drawPixmap(fish_x, fish_y, self.fish)
+        painter.translate(anchor)
+        painter.rotate(-65 * travel)
+        size = (1 - 0.40 * travel) * (1 - disappear)
+        painter.scale(size, size)
+        painter.setOpacity(1 - disappear)
+        painter.drawPixmap(QPointF(-self.fish.width() / 2, -self.fish_top), self.fish)
         painter.restore()
 
-        # 再从下往上覆盖实体部分
-        if self.progress > 0:
-            painter.save()
+    def on_swing_frame(self, value):
+        t = float(value)
+        self.swing_angle = 6 * math.sin(4 * math.pi * t) * (1 - t) ** 2
+        self.update()
 
-            if self.progress < 100:
-                body_height = self.fish_bottom - self.fish_top
-                filled_height = body_height * self.progress / 100
+    def on_feed_frame(self, value):
+        self.feed_time = float(value)
+        self.update()
 
-                fill_start_y = (
-                    fish_y + self.fish_bottom - filled_height
-                )
+    def start_feeding(self):
+        if self.state != "active" or self.progress != 100 or self.display_progress < 99.9:
+            return
+        self.card.hide()
+        self.progress_animation.stop()
+        self.swing_animation.stop()
+        self.swing_angle = 0.0
+        self.state = "feeding"
+        self.feed_time = 0.0
+        self.feed_animation.start()
 
-                # 只允许分界线下方的图片被画出来
-                painter.setClipRect(
-                    QRectF(
-                        fish_x,
-                        fill_start_y,
-                        self.fish.width(),
-                        fish_y + self.fish.height() - fill_start_y,
-                    )
-                )
+    def finish_feeding(self):
+        self.state = "completed"
+        self.setToolTip("任务完成啦！点击小猫开始新任务 · 左键拖动")
+        self.update()
 
-            painter.setOpacity(1.0)
-            painter.drawPixmap(fish_x, fish_y, self.fish)
-            painter.restore()
+    def cat_contains(self, position):
+        y = self.height() - self.cat.height() - 12
+        return QRectF(105, y + 20, 225, self.cat.height() - 25).contains(position)
+
+    def animate_progress(self):
+        # 连续更新时，从当前画面进度继续过渡。
+        self.progress_animation.stop()
+        self.progress_animation.setStartValue(float(self.display_progress))
+        self.progress_animation.setEndValue(float(self.progress))
+        self.progress_animation.start()
+        self.swing_animation.stop()
+        self.swing_animation.start()
+
+    def on_progress_frame(self, value):
+        self.display_progress = float(value)
+        self.update()
 
     def fish_contains(self, position):
         # 给细小鱼干留少许点击余量，不要求精确点中线条。
+        if self.state != "active":
+            return False
+        inverse, valid = self.swing_transform().inverted()
+        if valid:
+            position = inverse.map(position)
         x = 125 - self.fish.width() // 2
         return QRectF(
             x + 12, 58 + self.fish_top - 5,
@@ -260,6 +371,7 @@ class Kitty(QWidget):
             self.press_position = event.globalPosition().toPoint()
             self.drag_offset = self.press_position - self.frameGeometry().topLeft()
             self.pressed_fish = self.fish_contains(event.position())
+            self.pressed_cat = self.cat_contains(event.position())
             self.dragged = False
             event.accept()
         else:
@@ -282,13 +394,20 @@ class Kitty(QWidget):
                 self.pressed_fish and not self.dragged
                 and self.fish_contains(event.position())
             )
+            tap_cat = self.pressed_cat and not self.dragged and self.cat_contains(event.position())
+            self.pressed_cat = False
             self.drag_offset = None
             self.press_position = None
             self.pressed_fish = False
             self.dragged = False
             event.accept()
-            if open_card:
-                self.card.open_near_fish()
+            if self.state != "feeding":
+                if tap_cat and self.state == "completed":
+                    self.card.open_near_fish()
+                elif tap_cat and self.progress == 100:
+                    self.start_feeding()
+                elif open_card:
+                    self.card.open_near_fish()
         else:
             super().mouseReleaseEvent(event)
 
