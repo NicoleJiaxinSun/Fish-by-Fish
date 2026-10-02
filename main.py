@@ -153,31 +153,44 @@ class Kitty(QWidget):
             self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton:
-            self.edit_progress()
-            event.accept()
-
-        elif event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.drag_offset = (
                 event.globalPosition().toPoint()
                 - self.frameGeometry().topLeft()
             )
             event.accept()
 
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.drag_offset = None
+            event.accept()
+
+        else:
+            super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event):
         if (
-            event.buttons() & Qt.MouseButton.LeftButton
-            and self.drag_offset is not None
+            self.drag_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
         ):
             self.move(
                 event.globalPosition().toPoint() - self.drag_offset
             )
             event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_offset = None
+        self.drag_offset = None
+
+        if event.button() == Qt.MouseButton.RightButton:
             event.accept()
+            self.edit_progress()
+
+        elif event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+
+        else:
+            super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
